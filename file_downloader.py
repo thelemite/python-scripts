@@ -108,7 +108,7 @@ def determine_filename(url: str, response: httpx.Response) -> str:
 
 def download_file(url: str, dest_dir: pathlib.Path) -> None:
     try:
-        with httpx.stream("GET", url, follow_redirects=True) as resp:
+        with httpx.stream("GET", url, follow_redirects=True, timeout=30.0) as resp:
             resp.raise_for_status()
             filename = determine_filename(url, resp)
             dest_path = dest_dir / filename

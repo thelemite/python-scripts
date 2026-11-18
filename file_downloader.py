@@ -24,6 +24,7 @@ import time
 import pathlib
 import sys
 import logging
+import mimetypes
 from urllib.parse import urlparse, unquote
 
 import pandas as pd
@@ -58,6 +59,11 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Maximum number of files to download (optional)",
     )
+    parser.add_argument(
+        "--file-name-column",
+        required=False,
+        help="Column name to use for filenames (optional)",
+    )
     return parser.parse_args()
 
 
@@ -75,19 +81,41 @@ def build_engine(host: str, database: str, user: str, password: str):
         sys.exit(1)
 
 
-def fetch_urls(engine, table: str, column: str) -> pd.Series:
-    query = f"SELECT {column} FROM {table}"
+def fetch_data(engine, table: str, url_column: str, name_column: str = None) -> pd.DataFrame:
+    # Build SELECT clause based on requested columns
+    columns = [url_column]
+    if name_column:
+        columns.append(name_column)
+    query = f"SELECT {', '.join(columns)} FROM {table}"
     try:
         df = pd.read_sql_query(query, con=engine)
-        if column not in df.columns:
-            raise KeyError(f"Column '{column}' not found in query result")
-        return df[column].dropna()
+        if url_column not in df.columns:
+            raise KeyError(f"Column '{url_column}' not found in query result")
+        # Remove rows with missing URLs
+        df = df.dropna(subset=[url_column])
+        return df
     except Exception as e:
-        logging.error("Error fetching URLs: %s", e)
+        logging.error("Error fetching data: %s", e)
         sys.exit(1)
 
 
-def determine_filename(url: str, response: httpx.Response) -> str:
+def determine_filename(url: str, response: httpx.Response, name_value: str = None) -> str:
+    """Determine a filename for the downloaded content.
+
+    If ``name_value`` is provided, it is used as the base filename and the
+    appropriate extension is appended based on the response's ``Content-Type``.
+    Otherwise, the function falls back to the original heuristics (Content-
+    Disposition header, URL basename, or a generated UUID)."""
+    if name_value is not None:
+        base = str(name_value).strip()
+        # Determine mime type extension
+        content_type = response.headers.get("content-type", "")
+        mime = content_type.split(";")[0].strip()
+        ext = mimetypes.guess_extension(mime) or ""
+        # Avoid double extension
+        if ext and base.lower().endswith(ext.lower()):
+            return base
+        return f"{base}{ext}"
     # Prefer Content-Disposition filename if present
     cd = response.headers.get("content-disposition")
     if cd:
@@ -106,11 +134,11 @@ def determine_filename(url: str, response: httpx.Response) -> str:
     return f"file_{uuid.uuid4().hex}"
 
 
-def download_file(url: str, dest_dir: pathlib.Path) -> None:
+def download_file(url: str, dest_dir: pathlib.Path, name_value: str = None) -> None:
     try:
         with httpx.stream("GET", url, follow_redirects=True, timeout=30.0) as resp:
             resp.raise_for_status()
-            filename = determine_filename(url, resp)
+            filename = determine_filename(url, resp, name_value)
             dest_path = dest_dir / filename
             # Avoid overwriting existing files
             counter = 1
@@ -133,14 +161,19 @@ def main():
     output_dir.mkdir(parents=True, exist_ok=True)
 
     engine = build_engine(args.host, args.database, args.user, args.password)
-    urls = fetch_urls(engine, args.table, args.column)
+    # Retrieve URLs and optional filename column
+    df = fetch_data(engine, args.table, args.column, getattr(args, 'file_name_column', None))
     if args.max_files is not None:
-        urls = urls.head(args.max_files)
+        df = df.head(args.max_files)
 
-    for url in urls:
+    for _, row in df.iterrows():
+        url = row[args.column]
         if not isinstance(url, str) or not url.strip():
             continue
-        download_file(url.strip(), output_dir)
+        name_val = None
+        if getattr(args, 'file_name_column', None):
+            name_val = row.get(args.file_name_column)
+        download_file(url.strip(), output_dir, name_val)
         if args.delay > 0:
             time.sleep(args.delay)
 

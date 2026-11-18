@@ -102,36 +102,42 @@ def fetch_data(engine, table: str, url_column: str, name_column: str = None) -> 
 def determine_filename(url: str, response: httpx.Response, name_value: str = None) -> str:
     """Determine a filename for the downloaded content.
 
-    If ``name_value`` is provided, it is used as the base filename and the
-    appropriate extension is appended based on the response's ``Content-Type``.
-    Otherwise, the function falls back to the original heuristics (Content-
-    Disposition header, URL basename, or a generated UUID)."""
-    if name_value is not None:
-        base = str(name_value).strip()
-        # Determine mime type extension
+    The filename is derived from ``name_value`` (if provided), the
+    ``Content‑Disposition`` header, the URL path, or a generated UUID as a
+    fallback.  In all cases the appropriate file extension based on the
+    response's ``Content‑Type`` header is appended (if an extension can be
+    inferred)."""
+    # Helper to attach mime‑type extension
+    def _add_extension(base: str) -> str:
         content_type = response.headers.get("content-type", "")
         mime = content_type.split(";")[0].strip()
         ext = mimetypes.guess_extension(mime) or ""
-        # Avoid double extension
-        if ext and base.lower().endswith(ext.lower()):
-            return base
-        return f"{base}{ext}"
-    # Prefer Content-Disposition filename if present
+        if ext and not base.lower().endswith(ext.lower()):
+            return f"{base}{ext}"
+        return base
+
+    if name_value is not None:
+        base = str(name_value).strip()
+        return _add_extension(base)
+
+    # Prefer Content‑Disposition filename if present
     cd = response.headers.get("content-disposition")
     if cd:
         parts = cd.split(";")
         for part in parts:
             if part.strip().lower().startswith("filename="):
                 filename = part.split("=", 1)[1].strip(' "')
-                return filename
+                return _add_extension(filename)
+
     # Fallback to URL path basename
     path = urlparse(url).path
     basename = os.path.basename(path)
     if basename:
-        return unquote(basename)
+        return _add_extension(unquote(basename))
+
     # As a last resort, generate a uuid
     import uuid
-    return f"file_{uuid.uuid4().hex}"
+    return _add_extension(f"file_{uuid.uuid4().hex}")
 
 
 def download_file(url: str, dest_dir: pathlib.Path, name_value: str = None) -> None:
